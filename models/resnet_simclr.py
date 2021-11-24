@@ -12,10 +12,21 @@ class ResNetSimCLR(nn.Module):
                             "resnet50": models.resnet50(pretrained=False, num_classes=out_dim)}
 
         self.backbone = self._get_basemodel(base_model)
+        print(self.backbone)
         dim_mlp = self.backbone.fc.in_features
 
         # add mlp projection head
         self.backbone.fc = nn.Sequential(nn.Linear(dim_mlp, dim_mlp), nn.ReLU(), self.backbone.fc)
+        print(self.backbone)
+        # Print model's state_dict
+        # print("Model's state_dict:")
+        #
+        # for name, param in self.backbone.named_parameters():
+        #     if name in ['fc.0.weight', 'fc.bias']:
+        #         print(name)
+        # print("_---------")
+        # for param_tensor in self.backbone.state_dict():
+        #     print(param_tensor, "\t", self.backbone.state_dict()[param_tensor].size())
 
     def _get_basemodel(self, model_name):
         try:
