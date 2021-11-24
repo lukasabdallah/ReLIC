@@ -1,2 +1,6 @@
 runs/
 __pycache__/
+checkpoint
+.idea
+Pipfile
+dataset-paths.json

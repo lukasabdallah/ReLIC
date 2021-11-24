@@ -1,116 +1,140 @@
-import logging
+'''Train an encoder using Contrastive Learning.'''
+import argparse
 import os
-import sys
+import subprocess
 
 import torch
-import torch.nn.functional as F
-from torch.cuda.amp import GradScaler, autocast
-from torch.utils.tensorboard import SummaryWriter
+import torch.backends.cudnn as cudnn
+import torch.nn as nn
+import torch.optim as optim
+# from torchlars import LARS
 from tqdm import tqdm
-from utils import save_config_file, accuracy, save_checkpoint
 
-torch.manual_seed(0)
+from configs import get_datasets
+from critic import LinearCritic
+from evaluate import save_checkpoint, encode_train_set, train_clf, test
+from models import *
+from scheduler import CosineAnnealingWithLinearRampLR
+
+parser = argparse.ArgumentParser(description='PyTorch Contrastive Learning.')
+parser.add_argument('--base-lr', default=0.25, type=float, help='base learning rate, rescaled by batch_size/256')
+parser.add_argument("--momentum", default=0.9, type=float, help='SGD momentum')
+parser.add_argument('--resume', '-r', type=str, default='', help='resume from checkpoint with this filename')
+parser.add_argument('--dataset', '-d', type=str, default='cifar10', help='dataset',
+                    choices=['cifar10', 'cifar100', 'stl10', 'imagenet'])
+parser.add_argument('--temperature', type=float, default=0.5, help='InfoNCE temperature')
+parser.add_argument("--batch-size", type=int, default=32, help='Training batch size')
+parser.add_argument("--num-epochs", type=int, default=100, help='Number of training epochs')
+parser.add_argument("--cosine-anneal", type=bool, default=True, help="Use cosine annealing on the learning rate")
+parser.add_argument("--arch", type=str, default='resnet50', help='Encoder architecture',
+                    choices=['resnet18', 'resnet34', 'resnet50'])
+parser.add_argument("--num-workers", type=int, default=2, help='Number of threads for data loaders')
+parser.add_argument("--test-freq", type=int, default=2, help='Frequency to fit a linear clf with L-BFGS for testing'
+                                                             'Not appropriate for large datasets. Set 0 to avoid '
+                                                             'classifier only training here.')
+parser.add_argument("--filename", type=str, default='ckpt.pth', help='Output file name')
+args = parser.parse_args()
+args.lr = args.base_lr * (args.batch_size / 256)
+
+args.git_hash = subprocess.check_output(['git', 'rev-parse', 'HEAD'])
+args.git_diff = subprocess.check_output(['git', 'diff'])
+
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+best_acc = 0  # best test accuracy
+start_epoch = 0  # start from epoch 0 or last checkpoint epoch
+clf = None
+
+print('==> Preparing data..')
+# TODO: only load necessary!
+trainset, testset, clftrainset, num_classes, stem = get_datasets(args.dataset)
+
+trainloader = torch.utils.data.DataLoader(trainset, batch_size=args.batch_size, shuffle=True,
+                                          num_workers=args.num_workers, pin_memory=True)
+testloader = torch.utils.data.DataLoader(testset, batch_size=1000, shuffle=False, num_workers=args.num_workers,
+                                         pin_memory=True)
+clftrainloader = torch.utils.data.DataLoader(clftrainset, batch_size=1000, shuffle=False, num_workers=args.num_workers,
+                                             pin_memory=True)
+
+# Model
+print('==> Building model..')
+##############################################################
+# Encoder
+##############################################################
+if args.arch == 'resnet18':
+    net = ResNet18(stem=stem)
+elif args.arch == 'resnet34':
+    net = ResNet34(stem=stem)
+elif args.arch == 'resnet50':
+    net = ResNet50(stem=stem)
+else:
+    raise ValueError("Bad architecture specification")
+net = net.to(device)
+
+##############################################################
+# Critic
+##############################################################
+critic = LinearCritic(net.representation_dim, temperature=args.temperature).to(device)
+
+if device == 'cuda':
+    repr_dim = net.representation_dim
+    net = torch.nn.DataParallel(net)
+    net.representation_dim = repr_dim
+    cudnn.benchmark = True
+
+if args.resume:
+    # Load checkpoint.
+    print('==> Resuming from checkpoint..')
+    assert os.path.isdir('checkpoint'), 'Error: no checkpoint directory found!'
+    resume_from = os.path.join('./checkpoint', args.resume)
+    checkpoint = torch.load(resume_from)
+    net.load_state_dict(checkpoint['net'])
+    critic.load_state_dict(checkpoint['critic'])
+    best_acc = checkpoint['acc']
+    start_epoch = checkpoint['epoch']
+
+criterion = nn.CrossEntropyLoss()
+
+base_optimizer = optim.SGD(list(net.parameters()) + list(critic.parameters()), lr=args.lr, weight_decay=1e-6,
+                           momentum=args.momentum)
+
+if args.cosine_anneal:
+    scheduler = CosineAnnealingWithLinearRampLR(base_optimizer, args.num_epochs)
+# encoder_optimizer = LARS(base_optimizer, trust_coef=1e-3)
+encoder_optimizer = base_optimizer
 
 
-class SimCLR(object):
+# Training
+def train(epoch):
+    print('\nEpoch: %d' % epoch)
+    net.train()
+    critic.train()
+    train_loss = 0
+    t = tqdm(enumerate(trainloader), desc='Loss: **** ', total=len(trainloader), bar_format='{desc}{bar}{r_bar}')
+    for batch_idx, (inputs, _, _) in t:
+        x1, x2 = inputs
+        x1, x2 = x1.to(device), x2.to(device)
+        encoder_optimizer.zero_grad()
+        representation1, representation2 = net(x1), net(x2)
+        raw_scores, pseudotargets = critic(representation1, representation2)
+        loss = criterion(raw_scores, pseudotargets)
+        loss.backward()
+        encoder_optimizer.step()
 
-    def __init__(self, *args, **kwargs):
-        self.args = kwargs['args']
-        self.model = kwargs['model'].to(self.args.device)
-        self.optimizer = kwargs['optimizer']
-        self.scheduler = kwargs['scheduler']
-        self.writer = SummaryWriter()
-        logging.basicConfig(filename=os.path.join(self.writer.log_dir, 'training.log'), level=logging.DEBUG)
-        self.criterion = torch.nn.CrossEntropyLoss().to(self.args.device)
+        train_loss += loss.item()
 
-    def info_nce_loss(self, features):
-
-        labels = torch.cat([torch.arange(self.args.batch_size) for i in range(self.args.n_views)], dim=0)
-        labels = (labels.unsqueeze(0) == labels.unsqueeze(1)).float()
-
-        labels = labels.to(self.args.device)
-
-        features = F.normalize(features, dim=1)
-
-        similarity_matrix = torch.matmul(features, features.T)
-
-        # assert similarity_matrix.shape == (
-        #     self.args.n_views * self.args.batch_size, self.args.n_views * self.args.batch_size)
-        # assert similarity_matrix.shape == labels.shape
-
-        # discard the main diagonal from both: labels and similarities matrix
-        mask = torch.eye(labels.shape[0], dtype=torch.bool).to(self.args.device)
-        labels = labels[~mask].view(labels.shape[0], -1)
-        similarity_matrix = similarity_matrix[~mask].view(similarity_matrix.shape[0], -1)
-
-        # assert similarity_matrix.shape == labels.shape
-
-        # select and combine multiple positives
-        positives = similarity_matrix[labels.bool()].view(labels.shape[0], -1)
-
-        # select only the negatives the negatives
-        negatives = similarity_matrix[~labels.bool()].view(similarity_matrix.shape[0], -1)
+        t.set_description('Loss: %.3f ' % (train_loss / (batch_idx + 1)))
 
 
-        logits = torch.cat([positives, negatives], dim=1)
-        labels = torch.zeros(logits.shape[0], dtype=torch.long).to(self.args.device)
-
-        logits = logits / self.args.temperature
-        return logits, labels
-
-    def train(self, train_loader):
-
-        scaler = GradScaler(enabled=self.args.fp16_precision)
-
-        # save config file
-        save_config_file(self.writer.log_dir, self.args)
-
-        n_iter = 0
-        logging.info(f"Start SimCLR training for {self.args.epochs} epochs.")
-        logging.info(f"Training with gpu: {self.args.disable_cuda}.")
-
-        for epoch_counter in range(self.args.epochs):
-            for images, _ in tqdm(train_loader):
-                # images = [img, img]
-                images = torch.cat(images, dim=0)  # [64, 3, 224, 224]
-
-                images = images.to(self.args.device)
-                # print(torch.cuda.memory_summary(device=None, abbreviated=False))
-
-                with autocast(enabled=self.args.fp16_precision):
-                    features = self.model(images)  # [64, 128]
-                    logits, labels = self.info_nce_loss(features)
-                    loss = self.criterion(logits, labels)
-                sys.exit()
-
-                self.optimizer.zero_grad()
-
-                scaler.scale(loss).backward()
-
-                scaler.step(self.optimizer)
-                scaler.update()
-
-                if n_iter % self.args.log_every_n_steps == 0:
-                    top1, top5 = accuracy(logits, labels, topk=(1, 5))
-                    self.writer.add_scalar('loss', loss, global_step=n_iter)
-                    self.writer.add_scalar('acc/top1', top1[0], global_step=n_iter)
-                    self.writer.add_scalar('acc/top5', top5[0], global_step=n_iter)
-                    self.writer.add_scalar('learning_rate', self.scheduler.get_lr()[0], global_step=n_iter)
-
-                n_iter += 1
-
-            # warmup for the first 10 epochs
-            if epoch_counter >= 10:
-                self.scheduler.step()
-            logging.debug(f"Epoch: {epoch_counter}\tLoss: {loss}\tTop1 accuracy: {top1[0]}")
-
-        logging.info("Training has finished.")
-        # save model checkpoints
-        checkpoint_name = 'checkpoint_{:04d}.pth.tar'.format(self.args.epochs)
-        save_checkpoint({
-            'epoch': self.args.epochs,
-            'arch': self.args.arch,
-            'state_dict': self.model.state_dict(),
-            'optimizer': self.optimizer.state_dict(),
-        }, is_best=False, filename=os.path.join(self.writer.log_dir, checkpoint_name))
-        logging.info(f"Model checkpoint and metadata has been saved at {self.writer.log_dir}.")
+for epoch in range(start_epoch, start_epoch + args.num_epochs):
+    train(epoch)
+    if (args.test_freq > 0) and (epoch % args.test_freq == (args.test_freq - 1)):
+        X, y = encode_train_set(clftrainloader, device, net)
+        clf = train_clf(X, y, net.representation_dim, num_classes, device, reg_weight=1e-5)
+        acc = test(testloader, device, net, clf)
+        if acc > best_acc:
+            best_acc = acc
+        save_checkpoint(net, clf, critic, epoch, args, os.path.basename(__file__))
+    elif args.test_freq == 0:
+        save_checkpoint(net, clf, critic, epoch, args, os.path.basename(__file__))
+    if args.cosine_anneal:
+        scheduler.step()
