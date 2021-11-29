@@ -6,6 +6,17 @@ from PIL import Image
 
 class CIFAR10Biaugment(torchvision.datasets.CIFAR10):
 
+    # def __init__(self, mode, batch_size):
+    #     self.mode = mode
+    #     self.batch_size = batch_size
+    #
+    # def __len__(self):
+    #     if self.mode == "relic":
+    #         len = len(self.data) / self.batch_size
+    #     else:
+    #         len = len(self.data) / self.batch_size
+    #     return len
+
     def __getitem__(self, index):
         """
         Args:

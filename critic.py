@@ -1,5 +1,6 @@
 import torch
 from torch import nn
+import sys
 
 
 class LinearCritic(nn.Module):
@@ -20,14 +21,35 @@ class LinearCritic(nn.Module):
 
     def forward(self, h1, h2):
         z1, z2 = self.project(h1), self.project(h2)
+
         sim11 = self.cossim(z1.unsqueeze(-2), z1.unsqueeze(-3)) / self.temperature
         sim22 = self.cossim(z2.unsqueeze(-2), z2.unsqueeze(-3)) / self.temperature
         sim12 = self.cossim(z1.unsqueeze(-2), z2.unsqueeze(-3)) / self.temperature
+        # sim 12 diag = positive pairs. Rest is negative pairs
+        # sim 11 , sim22 diag is identical pairs --> set to float("-inf")
+
         d = sim12.shape[-1]
+        # set diag to -inf
         sim11[..., range(d), range(d)] = float('-inf')
         sim22[..., range(d), range(d)] = float('-inf')
         raw_scores1 = torch.cat([sim12, sim11], dim=-1)
+
         raw_scores2 = torch.cat([sim22, sim12.transpose(-1, -2)], dim=-1)
         raw_scores = torch.cat([raw_scores1, raw_scores2], dim=-2)
+
         targets = torch.arange(2 * d, dtype=torch.long, device=raw_scores.device)
-        return raw_scores, targets
+
+        # sim12[..., range(d), range(d)] = 0
+        sim11[..., range(d), range(d)] = 0
+        sim22[..., range(d), range(d)] = 0
+        p_do1 = torch.exp(torch.cat([sim12, sim11], dim=-1))
+        sum1 = torch.sum(p_do1, dim=1)
+        reformat_sum1 = sum1.unsqueeze(dim=1).expand(-1, p_do1.size(dim=1))
+        p_do1 = torch.log(torch.div(p_do1, reformat_sum1))
+
+        p_do2 = torch.exp(torch.cat([sim12.transpose(-1, -2), sim22], dim=-1))
+        sum2 = torch.sum(p_do2, dim=1)
+        reformat_sum2 = sum2.unsqueeze(dim=1).expand(-1, p_do2.size(dim=1))
+        p_do2 = torch.div(p_do2, reformat_sum2)
+
+        return raw_scores, targets, p_do1, p_do2

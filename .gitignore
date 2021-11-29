@@ -1,6 +1,7 @@
-runs/
+runs*/
 __pycache__/
 checkpoint
 .idea
 Pipfile
 dataset-paths.json
+job_*
