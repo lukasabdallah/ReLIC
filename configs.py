@@ -42,9 +42,9 @@ def get_datasets(dataset, augment_clf_train=False, add_indices_to_data=False, nu
     transform_train = transforms.Compose([
         transforms.RandomResizedCrop(img_size, interpolation=Image.BICUBIC),
         transforms.RandomHorizontalFlip(),
-        ColourDistortion(s=0.5),
-        GaussianBlur(kernel_size=int(0.1 * img_size)),
-        transforms.ToTensor(),
+        ColourDistortion(s=1.0),
+        # GaussianBlur(kernel_size=int(0.1 * img_size)),
+        # transforms.ToTensor(),
         transforms.Normalize(*CACHED_MEAN_STD[dataset]),
     ])
 

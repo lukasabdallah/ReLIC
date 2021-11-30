@@ -6,17 +6,6 @@ from PIL import Image
 
 class CIFAR10Biaugment(torchvision.datasets.CIFAR10):
 
-    # def __init__(self, mode, batch_size):
-    #     self.mode = mode
-    #     self.batch_size = batch_size
-    #
-    # def __len__(self):
-    #     if self.mode == "relic":
-    #         len = len(self.data) / self.batch_size
-    #     else:
-    #         len = len(self.data) / self.batch_size
-    #     return len
-
     def __getitem__(self, index):
         """
         Args:
@@ -25,11 +14,16 @@ class CIFAR10Biaugment(torchvision.datasets.CIFAR10):
         Returns:
             tuple: (image, target) where target is index of the target class.
         """
-        img, target = self.data[index], self.targets[index]
+        img, target = self.data[index], [self.targets[i] for i in index]
+        # img, target = self.data[index], self.targets[index]
 
         # doing this so that it is consistent with all other datasets
         # to return a PIL Image
-        pil_img = Image.fromarray(img)
+        pil_img = [Image.fromarray(i) for i in img]
+        pil_img = [torchvision.transforms.ToTensor()(i) for i in pil_img]
+        # pil_img_ = torch.FloatTensor(img)
+        pil_img = torch.stack(pil_img)
+        # pil_img = torch.movedim(pil_img, 1, 3)
 
         if self.transform is not None:
             img = self.transform(pil_img)
