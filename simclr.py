@@ -8,8 +8,6 @@ import torch.backends.cudnn as cudnn
 import torch.nn as nn
 import torch.optim as optim
 from torchlars import LARS
-from tqdm import tqdm
-
 from configs import get_datasets
 from critic import LinearCritic
 from evaluate import save_checkpoint, encode_train_set, train_clf, test
@@ -36,7 +34,7 @@ parser.add_argument("--test-freq", type=int, default=50, help='Frequency to fit 
                                                               'classifier only training here.')
 parser.add_argument("--filename", type=str, default='ckpt.pth', help='Output file name')
 parser.add_argument("--mode", type=str, default='relic', choices=['relic', 'simclr'], help='ReLIC loss or SimCLR loss')
-parser.add_argument("--alpha", type=float, default='40', help='Weighting of KL loss')
+parser.add_argument("--alpha", type=float, default=40, help='Weighting of KL loss')
 args = parser.parse_args()
 args.lr = args.base_lr * (args.batch_size / 256)
 
@@ -44,6 +42,7 @@ args.git_hash = subprocess.check_output(['git', 'rev-parse', 'HEAD'])
 args.git_diff = subprocess.check_output(['git', 'diff'])
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
+print(f"Using: {device}")
 best_acc = 0  # best test accuracy
 start_epoch = 0  # start from epoch 0 or last checkpoint epoch
 clf = None
@@ -104,6 +103,7 @@ base_optimizer = optim.SGD(list(net.parameters()) + list(critic.parameters()), l
 if args.cosine_anneal:
     scheduler = CosineAnnealingWithLinearRampLR(base_optimizer, args.num_epochs)
 encoder_optimizer = LARS(base_optimizer, trust_coef=1e-3)
+# encoder_optimizer = base_optimizer
 
 
 

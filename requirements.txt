@@ -1,4 +1,4 @@
-torchvision==0.8.2 
+torchvision==0.8.2
 torchlars
 tqdm
 tensorboard
