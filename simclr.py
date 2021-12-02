@@ -7,7 +7,7 @@ import torch
 import torch.backends.cudnn as cudnn
 import torch.nn as nn
 import torch.optim as optim
-# from torchlars import LARS
+from torchlars import LARS
 from tqdm import tqdm
 
 from configs import get_datasets
@@ -28,7 +28,7 @@ parser.add_argument('--resume', '-r', type=str, default='', help='resume from ch
 parser.add_argument('--dataset', '-d', type=str, default='cifar100', help='dataset',
                     choices=['cifar10', 'cifar100', 'stl10', 'imagenet'])
 parser.add_argument('--temperature', type=float, default=0.5, help='InfoNCE temperature')
-parser.add_argument("--batch-size", type=int, default=128, help='Training batch size')
+parser.add_argument("--batch-size", type=int, default=4, help='Training batch size')
 parser.add_argument("--num-epochs", type=int, default=500, help='Number of training epochs')
 parser.add_argument("--cosine-anneal", type=bool, default=True, help="Use cosine annealing on the learning rate")
 parser.add_argument("--arch", type=str, default='resnet50', help='Encoder architecture',
